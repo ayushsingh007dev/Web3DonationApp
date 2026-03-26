@@ -1,0 +1,145 @@
+<script type="text/javascript">
+/* ========================== CONFIG ========================== */
+const CONFIG = {
+  // Sepolia (change to Base Sepolia by uncommenting below)
+  CHAIN_ID: 11155111,
+  RPC_URL: "https://rpc.sepolia.org",
+
+  // Base Sepolia:
+  // CHAIN_ID: 84532,
+  // RPC_URL: "https://sepolia.base.org",
+
+  CONTRACT_ADDRESS: "", // paste your deployed contract if you want Donate to call it
+  CONTRACT_ABI: [
+    "function donate(string note) payable",
+    "event Donation(address indexed donor, uint256 amount, string note)"
+  ],
+};
+/* ============================================================ */
+
+const $ = (s) => document.querySelector(s);
+const CHAIN_HEX = "0x" + CONFIG.CHAIN_ID.toString(16);
+const EXPLORER = CONFIG.CHAIN_ID === 84532 ? "https://sepolia.basescan.org" : "https://sepolia.etherscan.io";
+
+let ethersProvider = null, signer = null, user = null, cbProvider = null;
+
+function log(m) {
+  const el = document.getElementById("log");
+  if (el) { el.textContent += m + "\n"; el.scrollTop = el.scrollHeight; }
+  else { console.log(m); }
+}
+
+/* UMD-safe Coinbase SDK constructor */
+function getCoinbaseSDKCtor() {
+  if (window.CoinbaseWalletSDK && window.CoinbaseWalletSDK.CoinbaseWalletSDK) {
+    return window.CoinbaseWalletSDK.CoinbaseWalletSDK;
+  }
+  return window.CoinbaseWalletSDK || null;
+}
+
+async function ensureChain(provider) {
+  try {
+    await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_HEX }] });
+  } catch (e) {
+    if (e.code === 4902) {
+      await provider.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: CHAIN_HEX,
+          chainName: CONFIG.CHAIN_ID === 84532 ? "Base Sepolia" : "Ethereum Sepolia",
+          rpcUrls: [CONFIG.RPC_URL],
+          nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
+          blockExplorerUrls: [EXPLORER]
+        }]
+      });
+    } else { throw e; }
+  }
+}
+
+async function connectWith(provider) {
+  await ensureChain(provider);
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
+  user = accounts[0];
+  ethersProvider = new ethers.BrowserProvider(provider, CONFIG.CHAIN_ID);
+  signer = await ethersProvider.getSigner();
+  const who = $("#who");
+  if (who) who.textContent = `Connected: ${user.slice(0,6)}…${user.slice(-4)}`;
+  log("Connected: " + user);
+}
+
+async function connectBrowser() {
+  try {
+    if (user) return disconnectAll();
+    if (!window.ethereum) return alert("No browser wallet found. Install MetaMask or Coinbase Wallet extension.");
+    await connectWith(window.ethereum);
+  } catch (e) { alert(e?.message || "Failed to connect browser wallet."); }
+}
+
+async function connectCoinbase() {
+  try {
+    if (user) return disconnectAll();
+    const SDK = getCoinbaseSDKCtor();
+    if (!SDK) return alert("Coinbase Wallet SDK not loaded.");
+    const wallet = new SDK({ appName: "Your Website", appChainIds: [CONFIG.CHAIN_ID] });
+    cbProvider = wallet.makeWeb3Provider(CONFIG.RPC_URL, CONFIG.CHAIN_ID);
+    await connectWith(cbProvider);
+  } catch (e) { alert(e?.message || "Failed to connect Coinbase Wallet."); }
+}
+
+async function disconnectAll() {
+  try { cbProvider?.close?.(); } catch {}
+  ethersProvider = signer = cbProvider = null;
+  const prev = user; user = null;
+  const who = $("#who"); if (who) who.textContent = "Disconnected";
+  log("Disconnected" + (prev ? " " + prev : ""));
+}
+
+async function donate() {
+  try {
+    if (!signer) return alert("Connect a wallet first.");
+    if (!/^0x[0-9a-fA-F]{40}$/.test(CONFIG.CONTRACT_ADDRESS)) {
+      return log("Set CONFIG.CONTRACT_ADDRESS + CONFIG.CONTRACT_ABI to call a real contract.");
+    }
+    const noteInput = $("#note");
+    const note = (noteInput?.value || "Relief").toString();
+    const c = new ethers.Contract(CONFIG.CONTRACT_ADDRESS, CONFIG.CONTRACT_ABI, signer);
+    const tx = await c.donate(note, { value: ethers.parseEther("0.001") });
+    log("Tx sent: " + tx.hash);
+    const rc = await tx.wait();
+    log("Confirmed in block " + rc.blockNumber + " • " + EXPLORER + "/tx/" + tx.hash);
+  } catch (e) { log("Error: " + (e.reason || e.message || e)); }
+}
+
+/* Safe binder: tries multiple IDs, only binds if element exists */
+function bindClick(idList, handler) {
+  for (const id of idList) {
+    const el = document.getElementById(id);
+    if (el) { el.addEventListener("click", handler); return true; }
+  }
+  return false;
+}
+
+/* ---- Wait for DOM and then wire everything ---- */
+document.addEventListener("DOMContentLoaded", async () => {
+  // Bind to either your header IDs or the simple test IDs
+  bindClick(["connect-browser","btnBrowser"], connectBrowser);
+  bindClick(["connect-coinbase","btnCoinbase"], connectCoinbase);
+  bindClick(["btnDonate"], donate);
+
+  if (window.ethereum) {
+    window.ethereum.on?.("accountsChanged", (accs) => {
+      const who = $("#who");
+      if (!accs?.length) { if (who) who.textContent = "Disconnected"; user = null; }
+      else { user = accs[0]; if (who) who.textContent = `Connected: ${user.slice(0,6)}…${user.slice(-4)}`; }
+    });
+    window.ethereum.on?.("chainChanged", () => location.reload());
+  }
+
+  // Quick RPC sanity check
+  try {
+    const p = new ethers.JsonRpcProvider(CONFIG.RPC_URL, CONFIG.CHAIN_ID);
+    const n = await p.getBlockNumber();
+    log("RPC OK. Latest block: " + n);
+  } catch (e) { log("RPC check failed. Update CONFIG.RPC_URL."); }
+});
+</script>
